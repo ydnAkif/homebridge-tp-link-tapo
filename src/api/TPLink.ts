@@ -32,6 +32,17 @@ export default class TPLink {
   private classSetup = false;
 
   private tryResendCommand = false;
+  private readonly NETWORK_ERROR_LOG_THROTTLE_MS = 10 * 60 * 1000;
+  private readonly transientNetworkErrorCodes = new Set([
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'EHOSTDOWN',
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'ESOCKETTIMEDOUT'
+  ]);
+  private readonly lastTransientNetworkLogAt: Record<string, number> = {};
 
   private _prevPowerState = false;
   private _unsentData: any = {};
@@ -271,10 +282,50 @@ export default class TPLink {
       this.tryResendCommand = false;
       return (body?.result ?? body?.error_code === 0) as CommandReturnType<T>;
     } catch (e: any) {
-      this.log.error('Error sending command:', command, e);
+      if (this.isTransientNetworkError(e)) {
+        this.logTransientNetworkError(command.toString(), e);
+      } else {
+        this.log.error('Error sending command:', command, e);
+      }
+
       this.tryResendCommand = false;
       return null as CommandReturnType<T>;
     }
+  }
+
+  private getNetworkErrorCode(error: any): string {
+    return (
+      error?.code ||
+      error?.errno ||
+      error?.cause?.code ||
+      error?.cause?.errno ||
+      ''
+    );
+  }
+
+  private isTransientNetworkError(error: any): boolean {
+    const code = this.getNetworkErrorCode(error);
+    return this.transientNetworkErrorCodes.has(code);
+  }
+
+  private logTransientNetworkError(command: string, error: any) {
+    const code = this.getNetworkErrorCode(error) || 'UNKNOWN';
+    const key = `${command}-${code}`;
+    const now = Date.now();
+    const last = this.lastTransientNetworkLogAt[key] ?? 0;
+
+    if (now - last >= this.NETWORK_ERROR_LOG_THROTTLE_MS) {
+      this.lastTransientNetworkLogAt[key] = now;
+      this.log.debug(
+        'Transient network error:',
+        command,
+        `(${code})`,
+        `on ${this.ip}`
+      );
+      return;
+    }
+
+    this.log.debug('Suppressed network error:', command, code);
   }
 
   private async checkProtocol(): Promise<Protocol> {

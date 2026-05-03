@@ -43,8 +43,19 @@ You can add multiple devices bulbs with a single platform.
       "name": "TPLink Tapo Platform",
       "email": "tplink-email",
       "password": "tplink-password",
-      "addresses": ["192.168.x.x (the ip address of the device)"]
+      "addresses": [
+        {
+          "ip": "192.168.1.42",
+          "alias": "Aylin's Bedroom Smart Bulb"
+        },
+        {
+          "ip": "192.168.1.43",
+          "alias": "Living Room Strip"
+        }
+      ]
     }
   ]
 }
 ```
+
+You can still use plain IP strings, but using per-device `alias` is recommended so offline logs can include room/device names even when `deviceInfo` is unavailable.

@@ -28,10 +28,37 @@
         "required": true,
         "uniqueItems": true,
         "type": "array",
-        "description": "A list of IPs for each device",
+        "description": "A list of devices. You can use plain IP strings or objects with ip + alias/name.",
         "items": {
-          "title": "Ip Address",
-          "type": "string"
+          "oneOf": [
+            {
+              "title": "Ip Address",
+              "type": "string"
+            },
+            {
+              "title": "Device",
+              "type": "object",
+              "required": ["ip", "alias"],
+              "properties": {
+                "ip": {
+                  "title": "Ip Address",
+                  "type": "string",
+                  "description": "The IP address of the device"
+                },
+                "alias": {
+                  "title": "Alias",
+                  "type": "string",
+                  "description": "Preferred display name used in logs and Homebridge"
+                },
+                "name": {
+                  "title": "Name (legacy alternative to alias)",
+                  "type": "string",
+                  "description": "Alternative to alias; alias takes precedence if both are set"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         }
       }
     }
