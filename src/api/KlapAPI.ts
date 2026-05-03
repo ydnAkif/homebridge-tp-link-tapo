@@ -50,38 +50,45 @@ export default class KlapAPI extends API {
   }> {
     await this.handshake(forceHandshake);
 
+    const session = this.session;
+    if (!session?.cipher || !session.Cookie) {
+      throw new Error('KLAP session not initialized');
+    }
+
     const rawRequest = JSON.stringify({
       method,
       params: (Object.keys(params).length > 0 && params) || null
     });
     this.log.debug('[KLAP] Sending request:', rawRequest);
 
-    const requestData = this.session!.cipher!.encrypt(rawRequest);
+    const requestData = session.cipher.encrypt(rawRequest);
 
     try {
       const response = await this.sessionPost(
         '/request',
         requestData.encrypted,
         'arraybuffer',
-        this.session!.Cookie,
+        session.Cookie,
         {
           seq: requestData.seq.toString()
         }
       );
-  
+
       if (response.status !== 200) {
         throw new Error('[KLAP] Request failed');
       }
-  
-      const data = JSON.parse(this.session!.cipher!.decrypt(response.data));
-  
+
+      const data = JSON.parse(session.cipher.decrypt(response.data));
+
       return {
         response,
         body: data
       };
-    } catch(error:any) {
-      if(error.response?.status === 403 && !forceHandshake) {
-        this.log.warn("[KLAP] Forbidden. Redoing the request with a token regeneration.");
+    } catch (error: any) {
+      if (error.response?.status === 403 && !forceHandshake) {
+        this.log.warn(
+          '[KLAP] Forbidden. Redoing the request with a token regeneration.'
+        );
         return this.sendSecureRequest(method, params, _, true);
       }
       throw new Error(`[KLAP] Request failed: ${error}`);
@@ -229,12 +236,10 @@ export default class KlapAPI extends API {
 
         return;
       }
-
-      this.log.warn('[KLAP] Second handshake failed', handshake2Result.data);
     } catch (e: any) {
-      this.log.error(
-        '[KLAP] Second handshake failed:',
-        e.response.data || e.message
+      this.log.debug(
+        '[KLAP] Handshake retry required',
+        e.response?.data || e.message
       );
     }
 

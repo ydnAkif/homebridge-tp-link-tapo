@@ -220,11 +220,7 @@ export default class Platform implements DynamicPlatformPlugin {
     if (now - last >= this.OFFLINE_LOG_THROTTLE_MS) {
       this.lastOfflineLogAt[suppressionKey] = now;
       const baseMessage = `${deviceLabel} unreachable; suppressing repeated logs for 10 minutes.`;
-      if (errorMessage) {
-        this.log.warn(baseMessage, '|', errorMessage);
-      } else {
-        this.log.warn(baseMessage);
-      }
+      this.log.warn(baseMessage);
       return;
     }
 

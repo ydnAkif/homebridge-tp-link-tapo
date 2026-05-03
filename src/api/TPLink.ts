@@ -284,6 +284,8 @@ export default class TPLink {
     } catch (e: any) {
       if (this.isTransientNetworkError(e)) {
         this.logTransientNetworkError(command.toString(), e);
+      } else if (this.isOfflineSuppressionError(e)) {
+        // Intentionally silent: platform-level offline logger handles suppression and messaging.
       } else {
         this.log.error('Error sending command:', command, e);
       }
@@ -306,6 +308,34 @@ export default class TPLink {
   private isTransientNetworkError(error: any): boolean {
     const code = this.getNetworkErrorCode(error);
     return this.transientNetworkErrorCodes.has(code);
+  }
+
+  private getErrorText(error: any): string {
+    if (!error) {
+      return '';
+    }
+
+    if (typeof error === 'string') {
+      return error;
+    }
+
+    if (typeof error.message === 'string') {
+      return error.message;
+    }
+
+    return String(error);
+  }
+
+  private isOfflineSuppressionError(error: any): boolean {
+    const text = this.getErrorText(error);
+
+    return (
+      this.isTransientNetworkError(error) ||
+      text.includes('KLAP session not initialized') ||
+      text.includes('Second handshake failed') ||
+      text.includes("Cannot read properties of undefined (reading 'cipher')") ||
+      text.includes('Request failed')
+    );
   }
 
   private logTransientNetworkError(command: string, error: any) {
