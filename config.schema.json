@@ -30,8 +30,28 @@
         "type": "array",
         "description": "A list of IPs for each device",
         "items": {
-          "title": "Ip Address",
-          "type": "string"
+          "title": "Device address",
+          "oneOf": [
+            {
+              "type": "string",
+              "title": "IP address"
+            },
+            {
+              "type": "object",
+              "title": "Named IP address",
+              "properties": {
+                "ip": {
+                  "type": "string",
+                  "title": "IP address"
+                },
+                "alias": {
+                  "type": "string",
+                  "title": "Device name"
+                }
+              },
+              "required": ["ip"]
+            }
+          ]
         }
       }
     }

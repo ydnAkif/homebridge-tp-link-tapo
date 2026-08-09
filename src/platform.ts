@@ -7,13 +7,13 @@ import {
   Service,
   Characteristic
 } from 'homebridge';
+import { createConnection } from 'node:net';
 
 import Accessory, { AccessoryType, ChildType } from './@types/Accessory';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
 import DeviceInfo from './api/@types/DeviceInfo';
 import Context from './@types/Context';
 import TPLink from './api/TPLink';
-import delay from './utils/delay';
 
 import HubAccessory, { HubContext } from './accessories/Hub';
 import LightBulbAccessory from './accessories/LightBulb';
@@ -23,8 +23,23 @@ import ButtonAccessory from './accessories/Button';
 import ContactAccessory from './accessories/Contact';
 import MotionSensorAccessory from './accessories/MotionSensor';
 
+interface ConfiguredAddress {
+  ip: string;
+  configuredName?: string;
+}
+
+interface AddressConfigObject {
+  ip?: unknown;
+  address?: unknown;
+  alias?: unknown;
+  name?: unknown;
+}
+
 export default class Platform implements DynamicPlatformPlugin {
   private readonly TIMEOUT_TRIES = 20;
+  private readonly REDISCOVER_INTERVAL_MS = 10 * 1000;
+  private readonly REACHABILITY_TIMEOUT_MS = 1000;
+  private readonly OFFLINE_LOG_THROTTLE_MS = 10 * 60 * 1000;
 
   public readonly Service: typeof Service = this.api.hap.Service;
   public readonly Characteristic: typeof Characteristic =
@@ -34,6 +49,14 @@ export default class Platform implements DynamicPlatformPlugin {
   public readonly loadedChildUUIDs: Record<string, true> = {};
   public readonly registeredDevices: Accessory[] = [];
   public readonly hubs: HubAccessory[] = [];
+  private rediscoverTimer?: ReturnType<typeof setInterval>;
+  private readonly inFlightDeviceLoads: Record<string, boolean> = {};
+  private readonly inFlightReachabilityChecks: Record<
+    string,
+    Promise<boolean>
+  > = {};
+  private readonly lastOfflineLogAt: Record<string, number> = {};
+  private readonly offlineDevices: Record<string, boolean> = {};
   private readonly deviceRetry: {
     [key: string]: number;
   } = {};
@@ -56,9 +79,73 @@ export default class Platform implements DynamicPlatformPlugin {
     this.accessories.push(accessory);
   }
 
+  private getConfiguredAddresses(): ConfiguredAddress[] {
+    const rawAddresses = this.config?.addresses as unknown;
+
+    if (!Array.isArray(rawAddresses)) {
+      return [];
+    }
+
+    return rawAddresses
+      .map((entry: unknown): ConfiguredAddress | null => {
+        if (typeof entry === 'string') {
+          const ip = entry.trim();
+          return ip ? { ip } : null;
+        }
+
+        if (!entry || typeof entry !== 'object') {
+          return null;
+        }
+
+        const addressConfig = entry as AddressConfigObject;
+        const ip = String(addressConfig.ip ?? addressConfig.address ?? '').trim();
+        const configuredName = String(
+          addressConfig.alias ?? addressConfig.name ?? ''
+        ).trim();
+
+        if (!ip) {
+          return null;
+        }
+
+        return {
+          ip,
+          ...(configuredName ? { configuredName } : {})
+        };
+      })
+      .filter((item): item is ConfiguredAddress => item !== null);
+  }
+
+  private decodeNickname(nickname?: string): string {
+    if (!nickname) {
+      return '';
+    }
+
+    try {
+      const decoded = Buffer.from(nickname, 'base64').toString('utf-8').trim();
+      return decoded === 'No Name' ? '' : decoded;
+    } catch {
+      return '';
+    }
+  }
+
+  private getDeviceLabel(
+    ip: string,
+    configuredName?: string,
+    deviceInfo?: DeviceInfo
+  ): string {
+    const name =
+      configuredName?.trim() ||
+      this.decodeNickname(deviceInfo?.nickname) ||
+      deviceInfo?.model?.trim() ||
+      '';
+
+    return name ? `${name} (${ip})` : ip;
+  }
+
   private async discoverDevices() {
     try {
-      const { email, password, addresses } = this.config ?? {};
+      const { email, password } = this.config ?? {};
+      const addresses = this.getConfiguredAddresses();
       if (
         !email ||
         !password ||
@@ -78,7 +165,9 @@ export default class Platform implements DynamicPlatformPlugin {
       }
 
       await Promise.all(
-        addresses.map((address) => this.loadDevice(address, email, password))
+        addresses.map((address) =>
+          this.probeAndLoadDevice(address, email, password)
+        )
       );
 
       await Promise.all(
@@ -100,37 +189,174 @@ export default class Platform implements DynamicPlatformPlugin {
       );
 
       this.checkOldDevices();
+      this.startRediscovery(addresses, email, password);
     } catch (err: any) {
       this.log.error('Failed to discover devices:', err.message);
     }
   }
 
-  private async loadDevice(ip: string, email: string, password: string) {
+  private startRediscovery(
+    addresses: ConfiguredAddress[],
+    email: string,
+    password: string
+  ): void {
+    if (this.rediscoverTimer) {
+      return;
+    }
+
+    this.rediscoverTimer = setInterval(() => {
+      for (const address of addresses) {
+        const uuid = this.api.hap.uuid.generate(address.ip);
+        const isRegistered = this.registeredDevices.some(
+          (device) => device.UUID === uuid
+        );
+
+        if (isRegistered) {
+          continue;
+        }
+
+        void this.probeAndLoadDevice(address, email, password);
+      }
+    }, this.REDISCOVER_INTERVAL_MS);
+  }
+
+  private async isDeviceReachable(ip: string): Promise<boolean> {
+    const existingCheck = this.inFlightReachabilityChecks[ip];
+
+    if (existingCheck) {
+      return existingCheck;
+    }
+
+    const check = new Promise<boolean>((resolve) => {
+      const socket = createConnection({ host: ip, port: 80 });
+      let settled = false;
+
+      const finish = (reachable: boolean): void => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        socket.destroy();
+        resolve(reachable);
+      };
+
+      socket.setTimeout(this.REACHABILITY_TIMEOUT_MS);
+      socket.once('connect', () => finish(true));
+      socket.once('timeout', () => finish(false));
+      socket.once('error', () => finish(false));
+    });
+
+    this.inFlightReachabilityChecks[ip] = check;
+
+    try {
+      return await check;
+    } finally {
+      delete this.inFlightReachabilityChecks[ip];
+    }
+  }
+
+  private async probeAndLoadDevice(
+    address: ConfiguredAddress,
+    email: string,
+    password: string
+  ): Promise<void> {
+    const { ip, configuredName } = address;
     const uuid = this.api.hap.uuid.generate(ip);
+    const isRegistered = this.registeredDevices.some(
+      (device) => device.UUID === uuid
+    );
+
+    if (isRegistered || this.inFlightDeviceLoads[uuid]) {
+      return;
+    }
+
+    const reachable = await this.isDeviceReachable(ip);
+
+    if (!reachable) {
+      this.logOfflineDevice(ip, this.getDeviceLabel(ip, configuredName));
+      return;
+    }
+
+    if ((this.deviceRetry[uuid] ?? 0) <= 0) {
+      this.deviceRetry[uuid] = this.TIMEOUT_TRIES;
+    }
+
+    await this.loadDevice(address, email, password);
+  }
+
+  private logOfflineDevice(
+    suppressionKey: string,
+    deviceLabel: string,
+    error?: unknown
+  ): void {
+    const now = Date.now();
+    const last = this.lastOfflineLogAt[suppressionKey] ?? 0;
+    const errorMessage =
+      error instanceof Error ? error.message : error ? String(error) : '';
+
+    this.offlineDevices[suppressionKey] = true;
+
+    if (now - last >= this.OFFLINE_LOG_THROTTLE_MS) {
+      this.lastOfflineLogAt[suppressionKey] = now;
+      this.log.warn(
+        `${deviceLabel} unreachable; suppressing repeated logs for 10 minutes.`
+      );
+      return;
+    }
+
+    this.log.debug('[Offline/Suppressed]', deviceLabel, errorMessage);
+  }
+
+  private logDeviceOnlineAgain(
+    suppressionKey: string,
+    deviceLabel: string
+  ): void {
+    if (!this.offlineDevices[suppressionKey]) {
+      return;
+    }
+
+    delete this.offlineDevices[suppressionKey];
+    this.log.info(`${deviceLabel} online again.`);
+  }
+
+  private async loadDevice(
+    address: ConfiguredAddress,
+    email: string,
+    password: string
+  ): Promise<void> {
+    const { ip, configuredName } = address;
+    const uuid = this.api.hap.uuid.generate(ip);
+
+    if (this.inFlightDeviceLoads[uuid]) {
+      return;
+    }
+
+    this.inFlightDeviceLoads[uuid] = true;
+
     if (this.deviceRetry[uuid] === undefined) {
       this.deviceRetry[uuid] = this.TIMEOUT_TRIES;
     } else if (this.deviceRetry[uuid] <= 0) {
-      this.log.info('Retry timeout:', ip);
+      this.log.debug('Retry budget reached for now:', ip);
+      delete this.inFlightDeviceLoads[uuid];
       return;
-    } else {
-      this.log.info('Retry to connect in 10s', ':', ip);
-      await delay(10 * 1000);
-      this.log.info(
-        'Try for',
-        ip,
-        ':',
-        `${this.deviceRetry[uuid]}/${this.TIMEOUT_TRIES}`
-      );
     }
 
     try {
       const tpLink = await new TPLink(ip, email, password, this.log).setup();
       const deviceInfo = await tpLink.getInfo();
       if (Object.keys(deviceInfo || {}).length === 0) {
-        this.log.error('Failed to get info about:', ip);
         this.deviceRetry[uuid] -= 1;
-        return await this.loadDevice(ip, email, password);
+        this.logOfflineDevice(ip, this.getDeviceLabel(ip, configuredName));
+        delete this.inFlightDeviceLoads[uuid];
+        return;
       }
+
+      this.deviceRetry[uuid] = this.TIMEOUT_TRIES;
+      this.logDeviceOnlineAgain(
+        ip,
+        this.getDeviceLabel(ip, configuredName, deviceInfo)
+      );
 
       const deviceName = Buffer.from(
         deviceInfo?.nickname || 'Tm8gTmFtZQ==',
@@ -163,10 +389,12 @@ export default class Platform implements DynamicPlatformPlugin {
             Accessory.GetType(deviceInfo),
             deviceInfo?.type
           );
+          delete this.inFlightDeviceLoads[uuid];
           return;
         }
 
         this.registeredDevices.push(registeredAccessory);
+        delete this.inFlightDeviceLoads[uuid];
         return;
       }
 
@@ -189,18 +417,26 @@ export default class Platform implements DynamicPlatformPlugin {
           Accessory.GetType(deviceInfo),
           deviceInfo?.type
         );
+        delete this.inFlightDeviceLoads[uuid];
         return;
       }
 
       this.registeredDevices.push(registeredAccessory);
 
-      return this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
         accessory
       ]);
+      delete this.inFlightDeviceLoads[uuid];
+      return;
     } catch (err: any) {
-      this.log.error('Failed to get info about:', ip, '|', err.message);
       this.deviceRetry[uuid] -= 1;
-      return await this.loadDevice(ip, email, password);
+      this.logOfflineDevice(
+        ip,
+        this.getDeviceLabel(ip, configuredName),
+        err
+      );
+      delete this.inFlightDeviceLoads[uuid];
+      return;
     }
   }
 
@@ -213,17 +449,8 @@ export default class Platform implements DynamicPlatformPlugin {
     if (this.deviceRetry[uuid] === undefined) {
       this.deviceRetry[uuid] = this.TIMEOUT_TRIES;
     } else if (this.deviceRetry[uuid] <= 0) {
-      this.log.info('Retry timeout:', id);
+      this.log.debug('Retry budget reached for child:', id);
       return;
-    } else {
-      this.log.info('Retry to connect in 10s', ':', id);
-      await delay(10 * 1000);
-      this.log.info(
-        'Try for',
-        id,
-        ':',
-        `${this.deviceRetry[uuid]}/${this.TIMEOUT_TRIES}`
-      );
     }
 
     try {
@@ -263,6 +490,7 @@ export default class Platform implements DynamicPlatformPlugin {
           return;
         }
 
+        this.deviceRetry[uuid] = this.TIMEOUT_TRIES;
         this.registeredDevices.push(registeredAccessory);
         return;
       }
@@ -293,25 +521,25 @@ export default class Platform implements DynamicPlatformPlugin {
         return;
       }
 
+      this.deviceRetry[uuid] = this.TIMEOUT_TRIES;
       this.registeredDevices.push(registeredAccessory);
 
       return this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
         accessory
       ]);
     } catch (err: any) {
-      this.log.error('Failed to get info about child:', id, '|', err.message);
       this.deviceRetry[uuid] -= 1;
-      return await this.loadChildDevice(id, deviceInfo, parent);
+      this.logOfflineDevice(id, id, err);
+      return;
     }
   }
 
   private checkOldDevices() {
-    const addressesByUUID: Record<string, string> = (
-      (this.config?.addresses as string[]) || []
-    ).reduce(
-      (acc, ip) => ({
+    const addressesByUUID: Record<string, string> =
+      this.getConfiguredAddresses().reduce(
+      (acc, address) => ({
         ...acc,
-        [this.api.hap.uuid.generate(ip)]: ip
+        [this.api.hap.uuid.generate(address.ip)]: address.ip
       }),
       {}
     );

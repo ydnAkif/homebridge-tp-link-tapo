@@ -18,6 +18,16 @@ type Commands = typeof commands;
 type Command = keyof Commands;
 type CommandReturnType<T extends Command> = ReturnType<Commands[T]>;
 
+interface NetworkError {
+  code?: string;
+  errno?: string;
+  message?: string;
+  cause?: {
+    code?: string;
+    errno?: string;
+  };
+}
+
 export default class TPLink {
   public get protocol(): Protocol {
     return this._protocol;
@@ -32,6 +42,18 @@ export default class TPLink {
   private classSetup = false;
 
   private tryResendCommand = false;
+
+  private readonly NETWORK_ERROR_LOG_THROTTLE_MS = 10 * 60 * 1000;
+  private readonly transientNetworkErrorCodes = new Set([
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'EHOSTDOWN',
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'ESOCKETTIMEDOUT'
+  ]);
+  private readonly lastTransientNetworkLogAt: Record<string, number> = {};
 
   private _prevPowerState = false;
   private _unsentData: any = {};
@@ -270,11 +292,81 @@ export default class TPLink {
 
       this.tryResendCommand = false;
       return (body?.result ?? body?.error_code === 0) as CommandReturnType<T>;
-    } catch (e: any) {
-      this.log.error('Error sending command:', command, e);
+    } catch (e: unknown) {
+      if (this.isTransientNetworkError(e)) {
+        this.logTransientNetworkError(command.toString(), e);
+      } else if (this.isOfflineSuppressionError(e)) {
+        // Platform-level offline handling owns the user-facing message.
+      } else {
+        this.log.error('Error sending command:', command, e);
+      }
       this.tryResendCommand = false;
       return null as CommandReturnType<T>;
     }
+  }
+
+  private getNetworkErrorCode(error: unknown): string {
+    const networkError = error as NetworkError | undefined;
+    return (
+      networkError?.code ||
+      networkError?.errno ||
+      networkError?.cause?.code ||
+      networkError?.cause?.errno ||
+      ''
+    );
+  }
+
+  private isTransientNetworkError(error: unknown): boolean {
+    return this.transientNetworkErrorCodes.has(
+      this.getNetworkErrorCode(error)
+    );
+  }
+
+  private getErrorText(error: unknown): string {
+    if (!error) {
+      return '';
+    }
+
+    if (typeof error === 'string') {
+      return error;
+    }
+
+    if (error instanceof Error) {
+      return error.message;
+    }
+
+    return String(error);
+  }
+
+  private isOfflineSuppressionError(error: unknown): boolean {
+    const text = this.getErrorText(error);
+    return (
+      this.isTransientNetworkError(error) ||
+      text.includes('KLAP session not initialized') ||
+      text.includes('Second handshake failed') ||
+      text.includes("Cannot read properties of undefined (reading 'cipher')") ||
+      text.includes('Request failed')
+    );
+  }
+
+  private logTransientNetworkError(command: string, error: unknown): void {
+    const code = this.getNetworkErrorCode(error) || 'UNKNOWN';
+    const key = `${command}-${code}`;
+    const now = Date.now();
+    const last = this.lastTransientNetworkLogAt[key] ?? 0;
+
+    if (now - last >= this.NETWORK_ERROR_LOG_THROTTLE_MS) {
+      this.lastTransientNetworkLogAt[key] = now;
+      this.log.debug(
+        'Transient network error:',
+        command,
+        `(${code})`,
+        `on ${this.ip}`
+      );
+      return;
+    }
+
+    this.log.debug('Suppressed network error:', command, code);
   }
 
   private async checkProtocol(): Promise<Protocol> {

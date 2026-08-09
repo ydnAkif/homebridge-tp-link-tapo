@@ -1,5 +1,14 @@
 # Homebridge TP-Link Tapo
 
+## ydnAkif resilience build
+
+This fork keeps physically switched Tapo lights responsive without overloading
+low-powered Homebridge hosts. Offline devices receive a lightweight TCP probe
+every 10 seconds. The encrypted Tapo handshake only starts after the device is
+reachable, so a powered-on bulb normally returns to HomeKit shortly after its
+network stack finishes booting. Repeated offline log messages are throttled for
+10 minutes without slowing the reachability probes.
+
 ## This plugin has been archived and it will no longer receive updates
 
 [![Build and Lint](https://github.com/RaresAil/homebridge-tp-link-tapo/actions/workflows/build.yml/badge.svg)](https://github.com/RaresAil/homebridge-tp-link-tapo/actions/workflows/build.yml)
