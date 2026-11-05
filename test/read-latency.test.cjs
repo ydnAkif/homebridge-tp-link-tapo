@@ -83,3 +83,13 @@ test('legacy and KLAP HTTP calls have finite 2.5s transport timeouts', async () 
     assert.ok(options.every(o => o.timeout === 2500));
   } finally { axios.post = original; }
 });
+
+test('Axios deadline errors are throttled without dumping transport objects', async () => {
+  const errors = [];
+  const p = new TPLink('192.0.2.1', 'fixture', 'fixture', { ...log, error(...args) { errors.push(args); } });
+  const timeout = Object.assign(new Error('timeout of 2500ms exceeded'), { code: 'ECONNABORTED' });
+  assert.equal(p.isTransientNetworkError(timeout), true);
+  p.api.setup = async () => { throw timeout; };
+  await p.setup();
+  assert.deepEqual(errors, []);
+});

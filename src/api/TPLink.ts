@@ -39,6 +39,7 @@ export default class TPLink {
     'EHOSTDOWN',
     'ECONNREFUSED',
     'ECONNRESET',
+    'ECONNABORTED',
     'ETIMEDOUT',
     'ESOCKETTIMEDOUT'
   ]);
@@ -98,7 +99,9 @@ export default class TPLink {
 
       this.classSetup = true;
     } catch (e) {
-      this.log.error('Error setting up TPLink class:', e);
+      if (!this.isOfflineSuppressionError(e)) {
+        this.log.error('Error setting up TPLink class:', e);
+      }
     }
 
     return this;
