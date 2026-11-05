@@ -258,7 +258,9 @@ export default class Platform implements DynamicPlatformPlugin {
     }
 
     try {
-      const tpLink = await new TPLink(ip, email, password, this.log).setup();
+      const tpLink = await new TPLink(ip, email, password, this.log, () =>
+        new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE)
+      ).setup();
       const deviceInfo = await tpLink.getInfo();
       if (Object.keys(deviceInfo || {}).length === 0) {
         this.deviceRetry[uuid] -= 1;

@@ -254,6 +254,7 @@ export default class KlapAPI extends API {
     params?: Record<string, unknown>
   ) {
     return axios.post(`http://${this.ip}/app${path}`, payload, {
+      timeout: 2500,
       responseType: responseType,
       params: params,
       headers: {

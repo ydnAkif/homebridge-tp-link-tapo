@@ -55,6 +55,9 @@ export default class TPLink {
     }
   > = {};
 
+  private infoInFlight?: Promise<DeviceInfo>;
+  private infoRetryAfter = 0;
+
   private infoCache?: {
     data: DeviceInfo;
     setAt: number;
@@ -72,7 +75,8 @@ export default class TPLink {
     private readonly ip: string,
     private readonly email: string,
     private readonly password: string,
-    private readonly log: Logger
+    private readonly log: Logger,
+    private readonly unavailableError: () => Error = () => new Error("Tapo device unavailable")
   ) {
     this.lock = new AsyncLock();
     this.api = new LegacyAPI(ip, email, password, log);
@@ -127,21 +131,41 @@ export default class TPLink {
     );
   }
 
-  public async getInfo(): Promise<DeviceInfo> {
-    return this.lock.acquire('get-info-cache', async () => {
-      if (this.infoCache && Date.now() - this.infoCache.setAt < 100) {
-        return this.infoCache.data;
+  public getInfo(): Promise<DeviceInfo> {
+    if (this.infoCache && Date.now() - this.infoCache.setAt < 500) {
+      return Promise.resolve(this.infoCache.data);
+    }
+    if (this.infoInFlight) return this.infoInFlight;
+    if (Date.now() < this.infoRetryAfter) return Promise.reject(this.unavailableError());
+
+    const request = this.sendCommand('deviceInfo');
+    let timer: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(this.unavailableError()), 1500);
+    });
+    const pending = Promise.race([request, deadline]).then((deviceInfo) => {
+      if (!deviceInfo || typeof deviceInfo !== 'object' || !deviceInfo.device_id) {
+        throw this.unavailableError();
       }
-
-      const deviceInfo = (await this.sendCommand('deviceInfo')) ?? {};
-      this.infoCache = {
-        data: deviceInfo,
-        setAt: Date.now()
-      };
-
+      this.infoCache = { data: deviceInfo, setAt: Date.now() };
+      this.infoRetryAfter = 0;
       this._prevPowerState = deviceInfo.device_on ?? false;
       return deviceInfo;
-    });
+    }).catch(() => {
+      this.infoRetryAfter = Date.now() + 30000;
+      throw this.unavailableError();
+    }).finally(() => clearTimeout(timer));
+    this.infoInFlight = pending;
+    // Keep sharing the same result until the actual I/O ends, even after the
+    // HomeKit deadline. A hung request must not build an unbounded lock queue.
+    const release = () => {
+      const clear = () => {
+        if (this.infoInFlight === pending) this.infoInFlight = undefined;
+      };
+      void pending.then(clear, clear);
+    };
+    void request.then(release, release);
+    return pending;
   }
 
   public async getChildInfo(childId: string): Promise<ChildInfo> {
@@ -279,6 +303,10 @@ export default class TPLink {
         this.log.error('Command error:', command, '>', body.error_code);
       }
 
+      if (validMethod === 'set_device_info') {
+        this.infoCache = undefined;
+        this.infoRetryAfter = 0;
+      }
       this.tryResendCommand = false;
       return (body?.result ?? body?.error_code === 0) as CommandReturnType<T>;
     } catch (e: any) {

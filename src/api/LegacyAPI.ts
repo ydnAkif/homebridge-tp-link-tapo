@@ -53,6 +53,7 @@ export default class LegacyAPI extends API {
         requestTimeMils: Date.now()
       }),
       {
+        timeout: 2500,
         headers: {
           'Content-Type': 'application/json',
           ...(setCookie && this.handshakeData.cookie
@@ -104,6 +105,7 @@ export default class LegacyAPI extends API {
           }
         }),
         {
+          timeout: 2500,
           headers: {
             'Content-Type': 'application/json',
             Cookie: this.handshakeData.cookie!
