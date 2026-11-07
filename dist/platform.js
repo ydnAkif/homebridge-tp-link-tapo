@@ -138,6 +138,9 @@ class Platform {
                 const liveTypes = [this.api.hap.Characteristic.On, this.api.hap.Characteristic.Brightness, this.api.hap.Characteristic.Hue, this.api.hap.Characteristic.Saturation, this.api.hap.Characteristic.ColorTemperature, this.api.hap.Characteristic.CurrentTemperature, this.api.hap.Characteristic.CurrentRelativeHumidity, this.api.hap.Characteristic.BatteryLevel, this.api.hap.Characteristic.OutletInUse];
                 if (liveTypes.some(type => type.UUID === characteristic.UUID)) {
                     characteristic.onGet(() => { throw new this.api.hap.HapStatusError(-70402 /* this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE */); });
+                    if (characteristic.props.perms.includes("pw" /* this.api.hap.Perms.PAIRED_WRITE */)) {
+                        characteristic.onSet(() => { throw new this.api.hap.HapStatusError(-70402 /* this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE */); });
+                    }
                 }
             }
         }

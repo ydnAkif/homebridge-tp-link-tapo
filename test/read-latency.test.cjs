@@ -109,3 +109,13 @@ test('failed child and cached commands do not manufacture empty successful data'
   const p=make();p.sendCommand=async()=>null;
   await assert.rejects(p.getChildInfo('fixture'));
 });
+test('cached offline live values and writes fail until handlers are registered, without changing static names', () => {
+  const Platform=require('../dist/platform').default;
+  const types=['On','Brightness','Hue','Saturation','ColorTemperature','CurrentTemperature','CurrentRelativeHumidity','BatteryLevel','OutletInUse'];
+  const characteristic={UUID:'On',props:{perms:['pr','pw']},onGet(fn){this.getter=fn;},onSet(fn){this.setter=fn;}};
+  const name={UUID:'Name',props:{perms:['pr']},onGet(){throw Error('static name handler must not be replaced')}};
+  const p=Object.assign(Object.create(Platform.prototype),{log,accessories:[],api:{hap:{Service:{AccessoryInformation:{UUID:'info'}},Characteristic:Object.fromEntries(types.map(v=>[v,{UUID:v}])),Perms:{PAIRED_READ:'pr',PAIRED_WRITE:'pw'},HapStatusError:Offline,HAPStatus:{SERVICE_COMMUNICATION_FAILURE:-70402}}}});
+  p.configureAccessory({displayName:'fixture',services:[{UUID:'switch',characteristics:[characteristic,name]}]});
+  assert.throws(()=>characteristic.getter(),e=>e.hapStatus===-70402);
+  assert.throws(()=>characteristic.setter(true),e=>e.hapStatus===-70402);
+});
