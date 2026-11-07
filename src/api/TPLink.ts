@@ -45,7 +45,7 @@ export default class TPLink {
   ]);
   private readonly lastTransientNetworkLogAt: Record<string, number> = {};
 
-  private _prevPowerState = false;
+  private _prevPowerState: boolean | undefined;
   private _unsentData: any = {};
 
   private commandCache: Record<
@@ -79,7 +79,7 @@ export default class TPLink {
     private readonly log: Logger,
     private readonly unavailableError: () => Error = () => new Error("Tapo device unavailable")
   ) {
-    this.lock = new AsyncLock();
+    this.lock = new AsyncLock({ timeout: 10000, maxPending: 20 });
     this.api = new LegacyAPI(ip, email, password, log);
   }
 
@@ -123,7 +123,8 @@ export default class TPLink {
           return this.commandCache[cacheKey.toString()].data;
         }
 
-        const response = (await this.sendCommand(command, ...args)) ?? {};
+        const response = await this.sendCommand(command, ...args);
+        if (response === null || response === undefined || response === false) throw this.unavailableError();
         this.commandCache[cacheKey.toString()] = {
           data: response,
           setAt: Date.now()
@@ -141,7 +142,13 @@ export default class TPLink {
     if (this.infoInFlight) return this.infoInFlight;
     if (Date.now() < this.infoRetryAfter) return Promise.reject(this.unavailableError());
 
-    const request = this.sendCommand('deviceInfo');
+    const request = this.sendCommand('deviceInfo').then(deviceInfo => {
+      if (!deviceInfo || typeof deviceInfo !== 'object' || !deviceInfo.device_id) throw this.unavailableError();
+      this.infoCache = { data: deviceInfo, setAt: Date.now() };
+      this.infoRetryAfter = 0;
+      this._prevPowerState = deviceInfo.device_on;
+      return deviceInfo;
+    });
     let timer: ReturnType<typeof setTimeout>;
     const deadline = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(this.unavailableError()), 1500);
@@ -180,9 +187,9 @@ export default class TPLink {
         return this.childInfoCache[childId.toString()].data;
       }
 
-      const rawInfo =
-        (await this.sendCommand('childDeviceInfo', childId)) ?? {};
-      const deviceInfo = rawInfo?.responseData?.result ?? {};
+      const rawInfo = await this.sendCommand('childDeviceInfo', childId);
+      const deviceInfo = rawInfo?.responseData?.result;
+      if (!deviceInfo || typeof deviceInfo !== 'object' || Object.keys(deviceInfo).length === 0) throw this.unavailableError();
 
       this.childInfoCache[childId.toString()] = {
         data: deviceInfo,
@@ -199,18 +206,12 @@ export default class TPLink {
   ): Promise<CommandReturnType<T>> {
     return this.lock.acquire(
       'send-command',
-      (): Promise<CommandReturnType<T>> => {
-        if (command === 'power') {
-          if (args[0] === this._prevPowerState) {
-            return this._prevPowerState as unknown as Promise<
-              CommandReturnType<T>
-            >;
-          }
-
-          this._prevPowerState = args[0] as boolean;
-        }
-
-        return this.sendCommandWithNoLock(command, args, this._prevPowerState);
+      async (): Promise<CommandReturnType<T>> => {
+        const desiredPower = command === 'power' ? args[0] as boolean : this._prevPowerState;
+        const response = await this.sendCommandWithNoLock(command, args, desiredPower);
+        if (response === null || response === false || response === undefined) throw this.unavailableError();
+        if (command === 'power') this._prevPowerState = desiredPower;
+        return response;
       }
     );
   }
@@ -274,10 +275,6 @@ export default class TPLink {
           ? { ...this._unsentData }
           : {};
 
-      if (isDeviceOn) {
-        this._unsentData = {};
-      }
-
       const { body } = await this.api.sendSecureRequest(
         validMethod,
         {
@@ -303,9 +300,10 @@ export default class TPLink {
           }
         }
 
-        this.log.error('Command error:', command, '>', body.error_code);
+        throw this.unavailableError();
       }
 
+      if (isDeviceOn) this._unsentData = {};
       if (validMethod === 'set_device_info') {
         this.infoCache = undefined;
         this.infoRetryAfter = 0;

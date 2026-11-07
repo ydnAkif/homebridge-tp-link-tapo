@@ -33,12 +33,11 @@ class TPLink {
             'ESOCKETTIMEDOUT'
         ]);
         this.lastTransientNetworkLogAt = {};
-        this._prevPowerState = false;
         this._unsentData = {};
         this.commandCache = {};
         this.infoRetryAfter = 0;
         this.childInfoCache = {};
-        this.lock = new async_lock_1.default();
+        this.lock = new async_lock_1.default({ timeout: 10000, maxPending: 20 });
         this.api = new LegacyAPI_1.default(ip, email, password, log);
     }
     async setup() {
@@ -64,12 +63,13 @@ class TPLink {
     async cacheSendCommand(deviceId, command, ...args) {
         const cacheKey = `${deviceId}-${command}`;
         return this.lock.acquire(`cache-${cacheKey}`, async () => {
-            var _a;
             if (this.commandCache[cacheKey.toString()] &&
                 Date.now() - this.commandCache[cacheKey.toString()].setAt < 100) {
                 return this.commandCache[cacheKey.toString()].data;
             }
-            const response = (_a = (await this.sendCommand(command, ...args))) !== null && _a !== void 0 ? _a : {};
+            const response = await this.sendCommand(command, ...args);
+            if (response === null || response === undefined || response === false)
+                throw this.unavailableError();
             this.commandCache[cacheKey.toString()] = {
                 data: response,
                 setAt: Date.now()
@@ -85,7 +85,14 @@ class TPLink {
             return this.infoInFlight;
         if (Date.now() < this.infoRetryAfter)
             return Promise.reject(this.unavailableError());
-        const request = this.sendCommand('deviceInfo');
+        const request = this.sendCommand('deviceInfo').then(deviceInfo => {
+            if (!deviceInfo || typeof deviceInfo !== 'object' || !deviceInfo.device_id)
+                throw this.unavailableError();
+            this.infoCache = { data: deviceInfo, setAt: Date.now() };
+            this.infoRetryAfter = 0;
+            this._prevPowerState = deviceInfo.device_on;
+            return deviceInfo;
+        });
         let timer;
         const deadline = new Promise((_resolve, reject) => {
             timer = setTimeout(() => reject(this.unavailableError()), 1500);
@@ -118,13 +125,15 @@ class TPLink {
     }
     async getChildInfo(childId) {
         return this.lock.acquire('get-child-info-cache', async () => {
-            var _a, _b, _c;
+            var _a;
             if (this.childInfoCache[childId.toString()] &&
                 Date.now() - this.childInfoCache[childId.toString()].setAt < 10000) {
                 return this.childInfoCache[childId.toString()].data;
             }
-            const rawInfo = (_a = (await this.sendCommand('childDeviceInfo', childId))) !== null && _a !== void 0 ? _a : {};
-            const deviceInfo = (_c = (_b = rawInfo === null || rawInfo === void 0 ? void 0 : rawInfo.responseData) === null || _b === void 0 ? void 0 : _b.result) !== null && _c !== void 0 ? _c : {};
+            const rawInfo = await this.sendCommand('childDeviceInfo', childId);
+            const deviceInfo = (_a = rawInfo === null || rawInfo === void 0 ? void 0 : rawInfo.responseData) === null || _a === void 0 ? void 0 : _a.result;
+            if (!deviceInfo || typeof deviceInfo !== 'object' || Object.keys(deviceInfo).length === 0)
+                throw this.unavailableError();
             this.childInfoCache[childId.toString()] = {
                 data: deviceInfo,
                 setAt: Date.now()
@@ -133,14 +142,14 @@ class TPLink {
         });
     }
     async sendCommand(command, ...args) {
-        return this.lock.acquire('send-command', () => {
-            if (command === 'power') {
-                if (args[0] === this._prevPowerState) {
-                    return this._prevPowerState;
-                }
-                this._prevPowerState = args[0];
-            }
-            return this.sendCommandWithNoLock(command, args, this._prevPowerState);
+        return this.lock.acquire('send-command', async () => {
+            const desiredPower = command === 'power' ? args[0] : this._prevPowerState;
+            const response = await this.sendCommandWithNoLock(command, args, desiredPower);
+            if (response === null || response === false || response === undefined)
+                throw this.unavailableError();
+            if (command === 'power')
+                this._prevPowerState = desiredPower;
+            return response;
         });
     }
     async sendHubCommand(command, childId, ...args) {
@@ -181,9 +190,6 @@ class TPLink {
             const extraData = isDeviceOn && validMethod === 'set_device_info'
                 ? { ...this._unsentData }
                 : {};
-            if (isDeviceOn) {
-                this._unsentData = {};
-            }
             const { body } = await this.api.sendSecureRequest(validMethod, {
                 ...extraData,
                 ...params
@@ -201,8 +207,10 @@ class TPLink {
                         return this.sendCommandWithNoLock(command, args, isDeviceOn);
                     }
                 }
-                this.log.error('Command error:', command, '>', body.error_code);
+                throw this.unavailableError();
             }
+            if (isDeviceOn)
+                this._unsentData = {};
             if (validMethod === 'set_device_info') {
                 this.infoCache = undefined;
                 this.infoRetryAfter = 0;

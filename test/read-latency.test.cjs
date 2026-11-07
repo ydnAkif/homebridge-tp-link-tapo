@@ -37,7 +37,9 @@ test('offline requests return HomeKit communication errors at 1.5s without accum
   assert.equal(calls, 1); // Even a truly stuck I/O operation cannot grow the lock queue.
   finish(info);
   await flush();
-  assert.equal(p.infoCache, undefined); // A late success is not reported as fresh data.
+  assert.equal(p.infoCache.data, info); // Late success recovers availability for the next read.
+  assert.equal(p.infoRetryAfter, 0);
+  t.mock.timers.tick(501);
   p.sendCommand = async () => { calls++; return info; };
   assert.equal(await p.getInfo(), info);
   assert.equal(calls, 2);
@@ -92,4 +94,18 @@ test('Axios deadline errors are throttled without dumping transport objects', as
   p.api.setup = async () => { throw timeout; };
   await p.setup();
   assert.deepEqual(errors, []);
+});
+
+test('failed power commands are rejected and identical commands are retried after recovery', async () => {
+  const p=make();let calls=0;
+  p.sendCommandWithNoLock=async()=>{calls++;return null;};
+  await assert.rejects(p.sendCommand('power',false),e=>e.hapStatus===-70402);
+  assert.equal(p._prevPowerState,undefined);
+  p.sendCommandWithNoLock=async()=>{calls++;return true;};
+  await p.sendCommand('power',false);
+  assert.equal(calls,2);assert.equal(p._prevPowerState,false);
+});
+test('failed child and cached commands do not manufacture empty successful data', async () => {
+  const p=make();p.sendCommand=async()=>null;
+  await assert.rejects(p.getChildInfo('fixture'));
 });
