@@ -7,3 +7,5 @@ Validation: npm test (5 regression tests). Runtime dependencies are unchanged.
 ## 2026-11-07 audit fixes
 
 Power state is updated only after acknowledgment; identical power requests are transmitted again so an earlier failure cannot suppress recovery. Failed commands and missing child responses raise errors rather than fabricate data. Late successful reads refresh the cache and reset cooldown. Pending lock acquisition is bounded (10 seconds, 20 queued operations). Cached live characteristics report communication failure until the real handler is registered; static names and capabilities are preserved. Wall-switch-off bulbs remain expected offline devices.
+
+Legacy handshake transport failures also use the existing platform offline warning instead of repeated stack dumps. Explicit authentication/protocol errors retain their normal diagnostic handling.

@@ -362,6 +362,7 @@ export default class TPLink {
       this.isTransientNetworkError(error) ||
       text.includes('KLAP session not initialized') ||
       text.includes('Second handshake failed') ||
+      text.includes('Failed to handshake with device') ||
       text.includes("Cannot read properties of undefined (reading 'cipher')") ||
       text.includes('Request failed')
     );

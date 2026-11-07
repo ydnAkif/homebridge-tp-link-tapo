@@ -119,3 +119,10 @@ test('cached offline live values and writes fail until handlers are registered, 
   assert.throws(()=>characteristic.getter(),e=>e.hapStatus===-70402);
   assert.throws(()=>characteristic.setter(true),e=>e.hapStatus===-70402);
 });
+
+test('offline legacy handshake errors use the existing per-device warning rather than stack dumps', async () => {
+  const errors=[];const p=new TPLink('192.0.2.1','fixture','fixture',{...log,error(...args){errors.push(args);}});
+  p.api.needsNewHandshake=()=>true;p.api.login=async()=>{throw Error('Failed to handshake with device');};
+  await assert.rejects(p.sendCommand('deviceInfo'));
+  assert.deepEqual(errors,[]);
+});
